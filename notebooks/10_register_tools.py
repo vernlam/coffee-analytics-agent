@@ -39,14 +39,6 @@ USE FOR: "what happened" questions — totals, averages, trends, segment breakdo
 DO NOT USE FOR: causal questions about whether an intervention worked. Route those to build_control_group.'
 LANGUAGE PYTHON
 AS $$
-VALID_METRICS     = {{"revenue", "transaction_count", "avg_basket", "active_merchants"}}
-VALID_GROUP_BY    = {{"location_type", "region", "size_band", "brand"}}
-VALID_FILTER_KEYS = {{
-    "location_type": {{"urban", "suburban", "highway", "mall", "campus"}},
-    "region":        {{"northeast", "southeast", "midwest", "west"}},
-    "size_band":     {{"small", "mid", "large"}},
-    "brand":         {{"BrandA", "BrandB", "BrandC", "BrandD"}},
-}}
 METRIC_SQL = {{
     "revenue":           "ROUND(SUM(amount), 2) AS revenue",
     "transaction_count": "SUM(txn_count) AS transaction_count",
@@ -56,30 +48,13 @@ METRIC_SQL = {{
 TABLE = "main.coffee_analytics_gold.transactions_enriched"
 
 def query_metric(metric, start_date, end_date, group_by, filter_location_type, filter_region, filter_size_band, filter_brand):
-    if metric not in VALID_METRICS:
-        raise ValueError(f"Invalid metric {{metric!r}}. Valid: {{sorted(VALID_METRICS)}}")
-    if group_by is not None and group_by not in VALID_GROUP_BY:
-        raise ValueError(f"Invalid group_by {{group_by!r}}. Valid: {{sorted(VALID_GROUP_BY)}}")
-    if start_date > end_date:
-        raise ValueError(f"start_date {{start_date}} must be <= end_date {{end_date}}")
-
-    filters = {{
-        "location_type": filter_location_type,
-        "region":        filter_region,
-        "size_band":     filter_size_band,
-        "brand":         filter_brand,
-    }}
-    for key, val in filters.items():
-        if val is not None and val not in VALID_FILTER_KEYS[key]:
-            raise ValueError(f"Invalid filter value {{val!r}} for {{key!r}}. Valid: {{sorted(VALID_FILTER_KEYS[key])}}")
-
     select_cols = []
     if group_by:
         select_cols.append(group_by)
     select_cols.append(METRIC_SQL[metric])
 
     where = [f"txn_date BETWEEN '{{start_date}}' AND '{{end_date}}'"]
-    for key, val in filters.items():
+    for key, val in {{"location_type": filter_location_type, "region": filter_region, "size_band": filter_size_band, "brand": filter_brand}}.items():
         if val is not None:
             where.append(f"{{key}} = '{{val}}'")
 
