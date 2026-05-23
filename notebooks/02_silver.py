@@ -71,7 +71,7 @@ transactions = (
     )
     .withColumn("year",        F.year("txn_date"))
     .withColumn("month",       F.month("txn_date"))
-    .withColumn("day_of_week", F.date_format("txn_date", "u").cast(IntegerType()))
+    .withColumn("day_of_week", (F.dayofweek("txn_date")+ 5) % 7 + 1)
     .withColumn("is_weekend",  F.col("day_of_week") >= 6)
 )
 print(f"transactions: {transactions.count():,} rows")
