@@ -45,9 +45,10 @@ def build_control_group(
 
     weekly_df = _get_weekly_revenue(spark, pre_start, pre_end)
     pivot     = _normalize(weekly_df)
-    matches   = _match(pivot, treated_ids, n_matches)
+    matches    = _match(pivot, treated_ids, n_matches)
+    table_name = _write_matches(spark, matches, intervention_id)
 
-    return matches
+    return table_name
 
 
 def _get_intervention(intervention_id: str, spark: Any) -> tuple[list[str], date]:
@@ -123,6 +124,13 @@ def _match(
             })
 
     return pd.DataFrame(rows)
+
+
+def _write_matches(spark: Any, matches: pd.DataFrame, intervention_id: str) -> str:
+    """Writes matches to a Delta temp table and returns the table name."""
+    table_name = f"main.coffee_analytics_temp.matches_{intervention_id}"
+    spark.createDataFrame(matches).write.format("delta").mode("overwrite").saveAsTable(table_name)
+    return table_name
 
 
 def _resolve_spark(spark: Any) -> Any:
