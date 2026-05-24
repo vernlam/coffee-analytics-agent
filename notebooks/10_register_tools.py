@@ -16,6 +16,8 @@
 CATALOG = "main"
 SCHEMA  = "coffee_analytics_gold"
 
+spark.sql("CREATE SCHEMA IF NOT EXISTS main.coffee_analytics_temp")
+
 # COMMAND ----------
 
 # MAGIC %md
@@ -236,3 +238,8 @@ spark.sql(f"""
     FROM {CATALOG}.{SCHEMA}.build_control_group('INT_001', 10)
 """).show()
 
+
+# COMMAND ----------
+
+# MAGIC %md
+# MAGIC ## check_parallel_trends
