@@ -4,7 +4,7 @@ import uuid
 from typing import AsyncGenerator
 
 import mlflow
-from langchain_core.messages import AIMessage
+from langchain_core.messages import AIMessage, HumanMessage
 from langgraph.types import Command
 from mlflow.genai.agent_server import invoke, stream
 from mlflow.types.responses import (
@@ -20,22 +20,43 @@ logger = logging.getLogger(__name__)
 logging.getLogger("mlflow.utils.autologging_utils").setLevel(logging.ERROR)
 
 
+def _extract_text(content) -> str:
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        return " ".join(
+            item.get("text", "") if isinstance(item, dict) else str(item)
+            for item in content
+        )
+    return str(content)
+
+
+def _normalize_messages(raw_messages: list) -> list:
+    """Convert Responses API messages to LangChain HumanMessage objects."""
+    result = []
+    for m in raw_messages:
+        role = m.get("role", "user")
+        content = _extract_text(m.get("content", ""))
+        if content and role == "user":
+            result.append(HumanMessage(content=content))
+    return result
+
+
 def _run_graph(messages: list, config: dict) -> tuple[list[str], str | None]:
-    """Run or resume the graph. Returns (new AI message texts, HITL prompt or None)."""
     current_state = graph.get_state(config)
     prev_count = len(current_state.values.get("messages", [])) if current_state.values else 0
 
     if current_state.next and current_state.tasks and current_state.tasks[0].interrupts:
-        last_user_msg = messages[-1].get("content", "") if messages else ""
+        last_user_msg = _extract_text(messages[-1].get("content", "")) if messages else ""
         result = graph.invoke(Command(resume=last_user_msg), config=config)
     else:
-        result = graph.invoke({"messages": messages}, config=config)
+        normalized = _normalize_messages(messages)
+        result = graph.invoke({"messages": normalized}, config=config)
 
-    new_texts = [
-        m.content
-        for m in result.get("messages", [])[prev_count:]
-        if isinstance(m, AIMessage) and m.content
-    ]
+    new_texts = []
+    for m in result.get("messages", [])[prev_count:]:
+        if isinstance(m, AIMessage):
+            new_texts.append(_extract_text(m.content))
 
     interrupt_text = None
     new_state = graph.get_state(config)
@@ -55,7 +76,7 @@ async def invoke_handler(request: ResponsesAgentRequest) -> ResponsesAgentRespon
     messages = [i.model_dump() for i in request.input]
     new_texts, interrupt_text = await asyncio.to_thread(_run_graph, messages, config)
 
-    parts = new_texts[:]
+    parts = [t for t in new_texts if t]
     if interrupt_text:
         parts.append(interrupt_text)
 
@@ -79,7 +100,7 @@ async def stream_handler(
     messages = [i.model_dump() for i in request.input]
     new_texts, interrupt_text = await asyncio.to_thread(_run_graph, messages, config)
 
-    parts = new_texts[:]
+    parts = [t for t in new_texts if t]
     if interrupt_text:
         parts.append(interrupt_text)
 
