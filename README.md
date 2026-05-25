@@ -20,8 +20,8 @@ User (Streamlit chat)
         ▼
   router_node  ←── Claude Haiku (classify: descriptive or causal)
         │
-   ┌────┴─────┐
-   ▼           ▼
+   ┌────┴──────────┐
+   ▼               ▼
 text_to_sql  build_control_group
    │               │
    │          check_parallel_trends
@@ -128,3 +128,5 @@ The current agent is deliberately simple — the router makes a single binary de
 
 **Human-in-the-loop**
 How to implement a HITL layer using LangGraph's `interrupt()`. In causal analysis, users need to review whether the matched control group is a reasonable counterfactual before trusting the lift estimate — this is a judgement call that shouldn't be automated. The agent pauses after the parallel trends check, shows the user a chart of test versus control group trends over time, and waits for explicit approval before proceeding to the lift estimate. If the trends don't look parallel in the pre-period, the user can reject and the pipeline stops.
+
+![App screenshot](/assets/HITL.png)
