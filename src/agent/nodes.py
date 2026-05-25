@@ -1,7 +1,10 @@
 from typing import Literal, Optional
 
+import os
+
+from databricks.sdk import WorkspaceClient
 from langchain_core.messages import AIMessage
-from langchain_databricks import ChatDatabricks
+from langchain_openai import ChatOpenAI
 from langgraph.types import interrupt
 from pydantic import BaseModel
 
@@ -14,7 +17,17 @@ from .tools import (
     call_query_metric,
 )
 
-_llm = ChatDatabricks(model="databricks-meta-llama-3-3-70b-instruct")
+
+def _make_llm() -> ChatOpenAI:
+    w = WorkspaceClient()
+    return ChatOpenAI(
+        model="databricks-meta-llama-3-3-70b-instruct",
+        openai_api_base=f"{w.config.host}/serving-endpoints",
+        openai_api_key=w.config.token or "token",
+    )
+
+
+_llm = _make_llm()
 
 _ROUTER_SYSTEM = """You are a router for a coffee shop analytics agent.
 
