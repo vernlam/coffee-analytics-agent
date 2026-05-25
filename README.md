@@ -90,6 +90,28 @@ uv run streamlit run streamlit_app.py
 
 ---
 
+## Further revisions
+
+**SQL validation before execution**
+The text-to-SQL step currently sends whatever the LLM generates straight to Databricks. A validation step that checks the SQL only references allowed tables and columns would make it more robust and prevent unexpected queries from running.
+
+**HITL for text-to-SQL**
+Show the user the generated SQL before running it and let them approve or edit. This mirrors the causal HITL pattern and gives users more trust and transparency into what the agent is actually querying.
+
+**Evaluation harness**
+The synthetic data includes a `true_effect` oracle column — the ground truth lift for INT_001. An evaluation harness could run the full causal pipeline and compare the agent's lift estimate against the known answer to measure methodological accuracy.
+
+**Multiple interventions**
+Currently only one intervention (INT_001) exists in the data. Generating additional interventions with varying effect sizes and store characteristics would make the causal pipeline more interesting to demo and stress-test.
+
+**Streamlit Cloud deployment**
+The app currently runs locally only. Deploying to Streamlit Cloud would make it publicly accessible from a URL with no local setup required — better for sharing and portfolio presentation.
+
+**Query caching**
+Repeated identical questions hit the Databricks warehouse every time. A simple cache layer would reduce cost and latency for common queries.
+
+---
+
 ## What I learnt
 
 **LangGraph**
