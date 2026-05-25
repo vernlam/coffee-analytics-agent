@@ -1,5 +1,6 @@
 import asyncio
 import logging
+import uuid
 from typing import AsyncGenerator
 
 import mlflow
@@ -60,6 +61,7 @@ async def invoke_handler(request: ResponsesAgentRequest) -> ResponsesAgentRespon
 
     return ResponsesAgentResponse(output=[{
         "type": "message",
+        "id": f"msg_{uuid.uuid4().hex}",
         "role": "assistant",
         "content": [{"type": "output_text", "text": "\n\n".join(parts) or "I couldn't process your request."}],
     }])
