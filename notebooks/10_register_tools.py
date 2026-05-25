@@ -118,6 +118,7 @@ display(spark.sql(f"""
 
 # COMMAND ----------
 
+
 spark.sql(f"DROP FUNCTION IF EXISTS {CATALOG}.{SCHEMA}.build_control_group")
 
 spark.sql(f"""
@@ -253,7 +254,12 @@ CREATE FUNCTION {CATALOG}.{SCHEMA}.check_parallel_trends(
 )
 RETURNS TABLE
 COMMENT 'Compute weekly treated vs matched-control revenue trends for a given intervention.
+<<<<<<< Updated upstream
 USE FOR: causal questions — did an intervention work, what was the lift, did the pilot increase revenue. Call this first for any causal question.
+=======
+USE FOR: verifying the parallel trends assumption and visualizing lift over time.
+Call after build_control_group has been reviewed and approved at the HITL checkpoint.
+>>>>>>> Stashed changes
 DO NOT USE FOR: descriptive questions — use query_metric instead.'
 RETURN
   WITH intervention_meta AS (
@@ -262,7 +268,11 @@ RETURN
       start_date,
       DATE_SUB(start_date, 364)              AS match_pre_start,
       DATE_SUB(start_date, 1)                AS match_pre_end,
+<<<<<<< Updated upstream
       DATE_SUB(start_date, CAST(pre_window_days  AS INT)) AS trend_pre_start,
+=======
+      DATE_SUB(start_date, 364)              AS trend_pre_start,
+>>>>>>> Stashed changes
       DATE_ADD(start_date, CAST(post_window_days AS INT)) AS trend_post_end
     FROM main.coffee_analytics.interventions_agent_view
     WHERE intervention_id = check_parallel_trends.intervention_id
@@ -388,6 +398,12 @@ print("✓ registered: check_parallel_trends")
 
 # COMMAND ----------
 
+<<<<<<< Updated upstream
+=======
+
+# COMMAND ----------
+
+>>>>>>> Stashed changes
 # MAGIC %md
 # MAGIC ### Smoke tests
 
@@ -412,6 +428,15 @@ print(f"Avg absolute pre-period lift: {result['avg_abs_pre_lift']}% (expected: n
 # MAGIC %md
 # MAGIC ## estimate_lift
 
+<<<<<<< Updated upstream
+=======
+
+# COMMAND ----------
+
+# MAGIC %md
+# MAGIC ## estimate_lift
+
+>>>>>>> Stashed changes
 # COMMAND ----------
 
 spark.sql(f"DROP FUNCTION IF EXISTS {CATALOG}.{SCHEMA}.estimate_lift")
@@ -615,6 +640,13 @@ RETURN
 """)
 print("✓ registered: estimate_lift")
 
+<<<<<<< Updated upstream
+=======
+
+# COMMAND ----------
+
+
+>>>>>>> Stashed changes
 # COMMAND ----------
 
 # MAGIC %md
@@ -633,3 +665,17 @@ display(spark.sql(f"""
 display(spark.sql(f"""
     SELECT * FROM {CATALOG}.{SCHEMA}.estimate_lift('INT_001', 10, 4, NULL, NULL)
 """))
+<<<<<<< Updated upstream
+=======
+
+# COMMAND ----------
+
+# MAGIC %sql
+# MAGIC GRANT USE CATALOG ON CATALOG main TO `account users`;
+# MAGIC GRANT USE SCHEMA ON SCHEMA main.coffee_analytics_gold TO `account users`;
+# MAGIC GRANT EXECUTE ON SCHEMA main.coffee_analytics_gold TO `account users`;
+
+# COMMAND ----------
+
+spark.sql("SELECT 1").show()
+>>>>>>> Stashed changes
