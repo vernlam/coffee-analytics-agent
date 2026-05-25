@@ -110,6 +110,15 @@ def router_node(state: AgentState) -> dict:
         "filter_brand": result.get("filter_brand"),
     }
 
+    if result.get("route") == "causal":
+        updates.update({
+            "metric": None, "start_date": None, "end_date": None,
+            "group_by": None, "filter_location_type": None,
+            "filter_region": None, "filter_size_band": None, "filter_brand": None,
+        })
+    else:
+        updates["intervention_id"] = None
+
     if result.get("route") == "causal" and not result.get("intervention_id"):
         updates["messages"] = [AIMessage(
             content="I need an intervention ID to run the causal analysis. "
