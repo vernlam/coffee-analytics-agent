@@ -14,8 +14,8 @@ dependencies = [
     "databricks-sdk>=0.50.0",
     "mlflow>=3.10.0",
     "langgraph>=0.2.0",
-    "langchain-databricks>=0.3.0",
-    "langchain-core>=0.3.0",
+    "langchain-databricks>=0.1.0",
+    "langchain-core>=0.2.0",
     "python-dotenv>=1.2.1",
     "opentelemetry-exporter-otlp-proto-grpc>=1.25.0",
 ]
