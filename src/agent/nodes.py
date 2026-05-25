@@ -15,6 +15,33 @@ from .tools import (
     call_query_metric,
 )
 
+_ROLE_MAP = {"human": "user", "ai": "assistant", "system": "system"}
+
+
+def _extract_text(content) -> str:
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        return " ".join(
+            item.get("text", "") if isinstance(item, dict) else str(item)
+            for item in content
+        )
+    return str(content)
+
+
+def _to_api_messages(state_messages) -> list[dict]:
+    result = []
+    for m in state_messages:
+        if hasattr(m, "type"):  # LangChain message object
+            role = _ROLE_MAP.get(m.type, "user")
+            content = _extract_text(m.content)
+        else:  # plain dict
+            role = m.get("role", "user")
+            content = _extract_text(m.get("content", ""))
+        result.append({"role": role, "content": content})
+    return result
+
+
 _ROUTER_SYSTEM = """You are a router for a coffee shop analytics agent.
 
 Classify the user's question and extract parameters. Respond with valid JSON only — no markdown, no explanation.
@@ -67,11 +94,7 @@ def _call_llm(messages: list[dict]) -> dict:
 
 
 def router_node(state: AgentState) -> dict:
-    messages = [{"role": "system", "content": _ROUTER_SYSTEM}] + [
-        {"role": m.type if hasattr(m, "type") else m["role"],
-         "content": m.content if hasattr(m, "content") else m["content"]}
-        for m in state["messages"]
-    ]
+    messages = [{"role": "system", "content": _ROUTER_SYSTEM}] + _to_api_messages(state["messages"])
     result = _call_llm(messages)
 
     updates = {
