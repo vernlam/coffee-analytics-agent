@@ -16,7 +16,6 @@ from agent_server.utils import get_session_id
 from src.agent import graph
 
 logger = logging.getLogger(__name__)
-mlflow.langchain.autolog()
 logging.getLogger("mlflow.utils.autologging_utils").setLevel(logging.ERROR)
 
 
