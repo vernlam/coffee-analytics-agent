@@ -1,28 +1,37 @@
 import os
+import time
 from typing import Optional
 
 import pandas as pd
-from databricks.sdk import WorkspaceClient
-from databricks.sdk.service.sql import StatementState
+import requests
 
 
 def _execute_sql(sql: str) -> pd.DataFrame:
-    w = WorkspaceClient()
+    host = os.environ["DATABRICKS_HOST"].rstrip("/")
+    token = os.environ["DATABRICKS_TOKEN"]
     warehouse_id = os.environ["DATABRICKS_WAREHOUSE_ID"]
-    response = w.statement_execution.execute_statement(
-        warehouse_id=warehouse_id,
-        statement=sql,
-        wait_timeout="50s",
+    headers = {"Authorization": f"Bearer {token}"}
+
+    response = requests.post(
+        f"{host}/api/2.0/sql/statements",
+        headers=headers,
+        json={"warehouse_id": warehouse_id, "statement": sql, "wait_timeout": "50s"},
     )
-    if response.status.state != StatementState.SUCCEEDED:
-        error_msg = (
-            response.status.error.message
-            if response.status.error
-            else str(response.status.state)
-        )
-        raise RuntimeError(f"Query failed: {error_msg}")
-    columns = [col.name for col in response.manifest.schema.columns]
-    rows = response.result.data_array if response.result and response.result.data_array else []
+    response.raise_for_status()
+    data = response.json()
+
+    while data["status"]["state"] in ("PENDING", "RUNNING"):
+        time.sleep(1)
+        data = requests.get(
+            f"{host}/api/2.0/sql/statements/{data['statement_id']}",
+            headers=headers,
+        ).json()
+
+    if data["status"]["state"] != "SUCCEEDED":
+        raise RuntimeError(f"Query failed: {data['status'].get('error', {}).get('message', data['status']['state'])}")
+
+    columns = [col["name"] for col in data["manifest"]["schema"]["columns"]]
+    rows = data.get("result", {}).get("data_array") or []
     return pd.DataFrame(rows, columns=columns)
 
 
@@ -62,6 +71,17 @@ def call_estimate_lift(
         f"'{intervention_id}', {n_matches}, "
         f"{_sql_val(first_n_weeks)}, {_sql_val(week_start)}, {_sql_val(week_end)})"
     )
+
+
+def call_lookup_intervention(name_query: str) -> str | None:
+    safe = name_query.replace("'", "").replace("%", "")
+    pattern = "%" + "%".join(safe.split()) + "%"
+    df = _execute_sql(
+        f"SELECT intervention_id, name "
+        f"FROM main.coffee_analytics.interventions_agent_view "
+        f"WHERE LOWER(name) LIKE LOWER('{pattern}') LIMIT 1"
+    )
+    return df.iloc[0]["intervention_id"] if not df.empty else None
 
 
 def call_query_metric(

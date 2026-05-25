@@ -1,18 +1,19 @@
 import json
+import os
 import re
-from typing import Optional
 
-from databricks.sdk import WorkspaceClient
+import anthropic
 from langchain_core.messages import AIMessage
 from langgraph.types import interrupt
 
 from .state import AgentState
 from .tools import (
+    _execute_sql,
     _to_markdown,
     call_build_control_group,
     call_check_parallel_trends,
     call_estimate_lift,
-    call_query_metric,
+    call_lookup_intervention,
 )
 
 _ROLE_MAP = {"human": "user", "ai": "assistant", "system": "system"}
@@ -32,110 +33,130 @@ def _extract_text(content) -> str:
 def _to_api_messages(state_messages) -> list[dict]:
     result = []
     for m in state_messages:
-        if hasattr(m, "type"):  # LangChain message object
+        if hasattr(m, "type"):
             role = _ROLE_MAP.get(m.type, "user")
             content = _extract_text(m.content)
-        else:  # plain dict
+        else:
             role = m.get("role", "user")
             content = _extract_text(m.get("content", ""))
         result.append({"role": role, "content": content})
     return result
 
 
+def _llm(system: str, messages: list[dict], max_tokens: int = 500) -> str:
+    client = anthropic.Anthropic(api_key=os.environ["ANTHROPIC_API_KEY"])
+    response = client.messages.create(
+        model="claude-haiku-4-5-20251001",
+        max_tokens=max_tokens,
+        system=system,
+        messages=[m for m in messages if m["role"] != "system"],
+    )
+    return response.content[0].text
+
+
 _ROUTER_SYSTEM = """You are a router for a coffee shop analytics agent.
 
-Classify the user's question and extract parameters. Respond with valid JSON only — no markdown, no explanation.
+Classify the user's question. Respond with valid JSON only — no markdown, no explanation.
 
 Route as "descriptive" for: totals, averages, trends, breakdowns, what happened.
 Route as "causal" for: did an intervention work, what was the lift, did a pilot increase revenue.
 
-For descriptive, extract:
-- metric: one of revenue, transaction_count, avg_basket, active_merchants
-- start_date / end_date: ISO format YYYY-MM-DD
-- group_by: one of location_type, region, size_band, brand (or null)
-- filter_location_type: urban, suburban, highway, mall, campus (or null)
-- filter_region: northeast, southeast, midwest, west (or null)
-- filter_size_band: small, mid, large (or null)
-- filter_brand: BrandA, BrandB, BrandC, BrandD (or null)
-
-For causal, extract:
+For causal, also extract:
 - intervention_id: format INT_001, INT_002, etc. (null if not provided)
+- intervention_name: plain-language name the user used (null if they gave an ID directly)
 
 JSON schema:
 {
   "route": "descriptive" | "causal",
   "intervention_id": string | null,
-  "metric": string | null,
-  "start_date": string | null,
-  "end_date": string | null,
-  "group_by": string | null,
-  "filter_location_type": string | null,
-  "filter_region": string | null,
-  "filter_size_band": string | null,
-  "filter_brand": string | null
+  "intervention_name": string | null
 }"""
 
+_SCHEMA = """You have access to one table in Databricks SQL:
 
-def _call_llm(messages: list[dict]) -> dict:
-    w = WorkspaceClient()
-    response = w.api_client.do(
-        "POST",
-        "/serving-endpoints/databricks-meta-llama-3-3-70b-instruct/invocations",
-        body={"messages": messages, "temperature": 0, "max_tokens": 500},
-    )
-    content = response["choices"][0]["message"]["content"]
-    try:
-        return json.loads(content)
-    except json.JSONDecodeError:
-        match = re.search(r"```(?:json)?\s*(.*?)\s*```", content, re.DOTALL)
-        if match:
-            return json.loads(match.group(1))
-        raise ValueError(f"Router returned non-JSON: {content}")
+Table: main.coffee_analytics_gold.transactions_enriched
+Grain: one row per merchant per day
+Columns:
+  merchant_id      string   — unique store identifier
+  txn_date         date     — transaction date
+  amount           double   — daily revenue in dollars
+  txn_count        int      — number of transactions
+  year             int
+  month            int      (1–12)
+  day_of_week      int      (0=Monday, 6=Sunday)
+  is_weekend       boolean
+  location_type    string   — one of: urban, suburban, highway, mall, campus
+  region           string   — one of: northeast, southeast, midwest, west
+  size_band        string   — one of: small, mid, large
+  brand            string   — one of: BrandA, BrandB, BrandC, BrandD
+  onboarded_date   date
+
+Write a single SQL SELECT statement to answer the user's question.
+Return SQL only — no markdown, no explanation, no code fences."""
 
 
 def router_node(state: AgentState) -> dict:
     messages = [{"role": "system", "content": _ROUTER_SYSTEM}] + _to_api_messages(state["messages"])
-    result = _call_llm(messages)
+    raw = _llm(_ROUTER_SYSTEM, messages, max_tokens=200)
+
+    try:
+        result = json.loads(raw)
+    except json.JSONDecodeError:
+        match = re.search(r"```(?:json)?\s*(.*?)\s*```", raw, re.DOTALL)
+        result = json.loads(match.group(1)) if match else {"route": "descriptive"}
+
+    intervention_id = result.get("intervention_id")
+    if not intervention_id and result.get("intervention_name"):
+        intervention_id = call_lookup_intervention(result["intervention_name"])
 
     updates = {
         "route": result.get("route"),
-        "intervention_id": result.get("intervention_id"),
-        "metric": result.get("metric"),
-        "start_date": result.get("start_date"),
-        "end_date": result.get("end_date"),
-        "group_by": result.get("group_by"),
-        "filter_location_type": result.get("filter_location_type"),
-        "filter_region": result.get("filter_region"),
-        "filter_size_band": result.get("filter_size_band"),
-        "filter_brand": result.get("filter_brand"),
+        "intervention_id": intervention_id if result.get("route") == "causal" else None,
     }
 
-    if result.get("route") == "causal":
-        updates.update({
-            "metric": None, "start_date": None, "end_date": None,
-            "group_by": None, "filter_location_type": None,
-            "filter_region": None, "filter_size_band": None, "filter_brand": None,
-        })
-    else:
-        updates["intervention_id"] = None
-
-    if result.get("route") == "causal" and not result.get("intervention_id"):
+    if result.get("route") == "causal" and not intervention_id:
         updates["messages"] = [AIMessage(
-            content="I need an intervention ID to run the causal analysis. "
-                    "What's the ID? It should be in the format INT_001, INT_002, etc."
+            content="I need an intervention ID or name to run the causal analysis. "
+                    "Try something like 'did the mobile order pilot work' or 'did INT_001 work'."
         )]
 
     return updates
 
 
+def text_to_sql_node(state: AgentState) -> dict:
+    conversation = _to_api_messages(state["messages"])
+
+    sql = _llm(_SCHEMA, conversation, max_tokens=500).strip()
+
+    try:
+        df = _execute_sql(sql)
+    except Exception as e:
+        return {"messages": [AIMessage(content=f"I couldn't run that query: {e}")]}
+
+    table = _to_markdown(df)
+
+    last_user_msg = next(
+        (_extract_text(m.content) for m in reversed(state["messages"])
+         if hasattr(m, "type") and m.type == "human"),
+        "the user's question"
+    )
+
+    answer = _llm(
+        "You are a data analyst. Answer the user's question in 1-2 natural sentences based on the query results. Be concise and use plain English.",
+        [{"role": "user", "content": f"Question: {last_user_msg}\n\nResults:\n{table}"}],
+        max_tokens=200,
+    )
+
+    return {"messages": [AIMessage(content=f"{answer}\n\n```sql\n{sql}\n```")]}
+
+
 def build_control_group_node(state: AgentState) -> dict:
     n_matches = state.get("n_matches") or 10
     df = call_build_control_group(state["intervention_id"], n_matches)
-    table = _to_markdown(df)
     return {
-        "control_group_result": table,
+        "control_group_df_json": df.to_json(orient="records"),
         "messages": [AIMessage(
-            content=f"**Proposed control group for {state['intervention_id']}:**\n\n{table}"
+            content=f"**Control group for {state['intervention_id']}** — {len(df)} treated-control pairs. Download below."
         )],
     }
 
@@ -147,14 +168,13 @@ def check_parallel_trends_node(state: AgentState) -> dict:
     df["lift_pct"] = df["lift_pct"].astype(float)
     pre_period_lift = float(df[df["period"] == "pre"]["lift_pct"].abs().mean())
     verdict = "parallel trends holds ✓" if pre_period_lift < 1.0 else "parallel trends may be violated ⚠️"
-    table = _to_markdown(df)
 
     return {
-        "parallel_trends_result": table,
+        "parallel_trends_df_json": df.to_json(orient="records"),
         "pre_period_lift": pre_period_lift,
         "messages": [AIMessage(
-            content=f"**Parallel trends check:**\n\n{table}\n\n"
-                    f"Pre-period avg absolute lift: {pre_period_lift:.2f}% — {verdict}"
+            content=f"**Parallel trends check:** pre-period avg absolute lift: {pre_period_lift:.2f}% — {verdict}. "
+                    f"See chart and download below."
         )],
     }
 
@@ -185,25 +205,4 @@ def estimate_lift_node(state: AgentState) -> dict:
         f"| {row['n_weeks']} | {str(row['significant']).lower()} |"
     )
 
-    return {
-        "lift_result": summary,
-        "messages": [AIMessage(content=summary)],
-    }
-
-
-def query_metric_node(state: AgentState) -> dict:
-    df = call_query_metric(
-        metric=state.get("metric"),
-        start_date=state.get("start_date"),
-        end_date=state.get("end_date"),
-        group_by=state.get("group_by"),
-        filter_location_type=state.get("filter_location_type"),
-        filter_region=state.get("filter_region"),
-        filter_size_band=state.get("filter_size_band"),
-        filter_brand=state.get("filter_brand"),
-    )
-    table = _to_markdown(df)
-    return {
-        "query_metric_result": table,
-        "messages": [AIMessage(content=table)],
-    }
+    return {"lift_result": summary, "messages": [AIMessage(content=summary)]}

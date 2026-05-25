@@ -1,17 +1,4 @@
 # Databricks notebook source
-# MAGIC %md
-# MAGIC # 10 — Register Tools
-# MAGIC
-# MAGIC Registers agent tools as Unity Catalog functions so the Mosaic AI Agent
-# MAGIC Framework can discover and call them.
-# MAGIC
-# MAGIC Tools registered here:
-# MAGIC - `query_metric` — descriptive analytics (Mode 1)
-# MAGIC - `build_control_group` - causal impact analysis (Mode 2)
-# MAGIC
-# MAGIC Idempotent: safe to re-run (uses CREATE OR REPLACE).
-
-# COMMAND ----------
 
 CATALOG = "main"
 SCHEMA  = "coffee_analytics_gold"
@@ -20,59 +7,49 @@ spark.sql("CREATE SCHEMA IF NOT EXISTS main.coffee_analytics_temp")
 
 # COMMAND ----------
 
-# MAGIC %md
-# MAGIC ## query_metric
-
-# COMMAND ----------
-
-# Drop the existing Python function first
 spark.sql(f"DROP FUNCTION IF EXISTS {CATALOG}.{SCHEMA}.query_metric")
 
-# Now create the SQL version
 spark.sql(f"""
 CREATE FUNCTION {CATALOG}.{SCHEMA}.query_metric(
-    metric              STRING  COMMENT 'What to measure. One of: revenue, transaction_count, avg_basket, active_merchants.',
-    start_date          DATE    COMMENT 'Inclusive start of the date range.',
-    end_date            DATE    COMMENT 'Inclusive end of the date range.',
-    group_by            STRING  COMMENT 'Optional dimension to segment by. One of: location_type, region, size_band, brand. Pass NULL for a single aggregate row.',
-    filter_location_type STRING COMMENT 'Optional equality filter on location_type. One of: urban, suburban, highway, mall, campus. Pass NULL to include all.',
-    filter_region        STRING COMMENT 'Optional equality filter on region. One of: northeast, southeast, midwest, west. Pass NULL to include all.',
-    filter_size_band     STRING COMMENT 'Optional equality filter on size_band. One of: small, mid, large. Pass NULL to include all.',
-    filter_brand         STRING COMMENT 'Optional equality filter on brand. One of: BrandA, BrandB, BrandC, BrandD. Pass NULL to include all.'
+    metric               STRING,
+    start_date           DATE,
+    end_date             DATE,
+    group_by             STRING,
+    filter_location_type STRING,
+    filter_region        STRING,
+    filter_size_band     STRING,
+    filter_brand         STRING
 )
 RETURNS TABLE
-COMMENT 'Aggregate a descriptive metric from transactions_enriched over a date range.
-USE FOR: "what happened" questions — totals, averages, trends, segment breakdowns.
-DO NOT USE FOR: causal questions about whether an intervention worked. Route those to build_control_group.'
-RETURN 
-    SELECT 
-        CASE WHEN group_by IS NOT NULL THEN 
+RETURN
+    SELECT
+        CASE WHEN group_by IS NOT NULL THEN
             CASE group_by
                 WHEN 'location_type' THEN location_type
-                WHEN 'region' THEN region
-                WHEN 'size_band' THEN size_band
-                WHEN 'brand' THEN brand
+                WHEN 'region'        THEN region
+                WHEN 'size_band'     THEN size_band
+                WHEN 'brand'         THEN brand
             END
         END AS dimension,
         CASE metric
-            WHEN 'revenue' THEN ROUND(SUM(amount), 2)
+            WHEN 'revenue'           THEN ROUND(SUM(amount), 2)
             WHEN 'transaction_count' THEN SUM(txn_count)
-            WHEN 'avg_basket' THEN ROUND(SUM(amount) / NULLIF(SUM(txn_count), 0), 2)
-            WHEN 'active_merchants' THEN COUNT(DISTINCT merchant_id)
+            WHEN 'avg_basket'        THEN ROUND(SUM(amount) / NULLIF(SUM(txn_count), 0), 2)
+            WHEN 'active_merchants'  THEN COUNT(DISTINCT merchant_id)
         END AS metric_value
     FROM {CATALOG}.{SCHEMA}.transactions_enriched
     WHERE txn_date BETWEEN start_date AND end_date
         AND (filter_location_type IS NULL OR location_type = filter_location_type)
-        AND (filter_region IS NULL OR region = filter_region)
-        AND (filter_size_band IS NULL OR size_band = filter_size_band)
-        AND (filter_brand IS NULL OR brand = filter_brand)
-    GROUP BY 
-        CASE WHEN group_by IS NOT NULL THEN 
+        AND (filter_region        IS NULL OR region        = filter_region)
+        AND (filter_size_band     IS NULL OR size_band     = filter_size_band)
+        AND (filter_brand         IS NULL OR brand         = filter_brand)
+    GROUP BY
+        CASE WHEN group_by IS NOT NULL THEN
             CASE group_by
                 WHEN 'location_type' THEN location_type
-                WHEN 'region' THEN region
-                WHEN 'size_band' THEN size_band
-                WHEN 'brand' THEN brand
+                WHEN 'region'        THEN region
+                WHEN 'size_band'     THEN size_band
+                WHEN 'brand'         THEN brand
             END
         END
     ORDER BY dimension
@@ -81,12 +58,6 @@ print("✓ registered: query_metric")
 
 # COMMAND ----------
 
-# MAGIC %md
-# MAGIC ###Smoke tests
-
-# COMMAND ----------
-
-# Total revenue, full year 2024
 display(spark.sql(f"""
     SELECT * FROM {CATALOG}.{SCHEMA}.query_metric(
         'revenue', '2024-01-01', '2024-12-31', NULL, NULL, NULL, NULL, NULL
@@ -95,64 +66,30 @@ display(spark.sql(f"""
 
 # COMMAND ----------
 
-# Revenue by region, urban stores only, Q1 2024
-display(spark.sql(f"""
-    SELECT * FROM {CATALOG}.{SCHEMA}.query_metric(
-        'revenue', '2024-01-01', '2024-03-31', 'region', 'urban', NULL, NULL, NULL
-    )
-"""))
-
-# COMMAND ----------
-
-# Average basket by size band, full history
-display(spark.sql(f"""
-    SELECT * FROM {CATALOG}.{SCHEMA}.query_metric(
-        'avg_basket', '2023-01-01', '2024-12-31', 'size_band', NULL, NULL, NULL, NULL
-    )
-"""))
-
-# COMMAND ----------
-
-# MAGIC %md
-# MAGIC ## build_control_group
-
-# COMMAND ----------
-
-
 spark.sql(f"DROP FUNCTION IF EXISTS {CATALOG}.{SCHEMA}.build_control_group")
 
 spark.sql(f"""
 CREATE FUNCTION {CATALOG}.{SCHEMA}.build_control_group(
-    intervention_id STRING COMMENT 'ID of the intervention to analyze (e.g. INT_001).',
-    n_matches       INT    COMMENT 'Number of control stores to match per treated store. Default 10.'
+    intervention_id STRING,
+    n_matches       INT
 )
 RETURNS TABLE
-COMMENT 'Step 1 of the causal analysis workflow. Call this first for any causal question.
-Matches control stores to treated stores using normalized weekly pre-period revenue similarity.
-Returns one row per treated-control pair with a similarity score (0-1, higher is better).
-DO NOT USE FOR: descriptive questions about sales data — use query_metric instead.'
 RETURN
   WITH intervention_meta AS (
-    SELECT 
-      intervention_id,
+    SELECT
       treated_merchant_ids,
       start_date,
       DATE_SUB(start_date, 364) AS pre_start,
-      DATE_SUB(start_date, 1) AS pre_end
+      DATE_SUB(start_date, 1)   AS pre_end
     FROM main.coffee_analytics.interventions_agent_view
     WHERE intervention_id = build_control_group.intervention_id
   ),
-  -- Explode treated merchant IDs array into rows
   treated_merchants AS (
-    SELECT 
-      EXPLODE(treated_merchant_ids) AS merchant_id,
-      pre_start,
-      pre_end
+    SELECT EXPLODE(treated_merchant_ids) AS merchant_id, pre_start, pre_end
     FROM intervention_meta
   ),
-  -- Get weekly revenue for all merchants in pre-period
   weekly_revenue AS (
-    SELECT 
+    SELECT
       t.merchant_id,
       DATE_TRUNC('week', t.txn_date) AS week_start,
       SUM(t.amount) AS weekly_revenue
@@ -161,49 +98,39 @@ RETURN
     WHERE t.txn_date BETWEEN i.pre_start AND i.pre_end
     GROUP BY t.merchant_id, DATE_TRUNC('week', t.txn_date)
   ),
-  -- Calculate mean revenue per merchant
   merchant_means AS (
-    SELECT 
-      merchant_id,
-      AVG(weekly_revenue) AS mean_revenue
+    SELECT merchant_id, AVG(weekly_revenue) AS mean_revenue
     FROM weekly_revenue
     GROUP BY merchant_id
   ),
-  -- Normalize weekly revenue by merchant mean
   normalized_revenue AS (
-    SELECT 
+    SELECT
       w.merchant_id,
       w.week_start,
       w.weekly_revenue / NULLIF(m.mean_revenue, 0) AS normalized_revenue
     FROM weekly_revenue w
     JOIN merchant_means m ON w.merchant_id = m.merchant_id
   ),
-  -- Create treated-control pairs and calculate similarity
   similarity_scores AS (
-    SELECT 
+    SELECT
       treated.merchant_id AS treated_merchant_id,
       control.merchant_id AS control_merchant_id,
       SUM(ABS(treated.normalized_revenue - control.normalized_revenue)) AS total_residual
     FROM normalized_revenue treated
-    JOIN normalized_revenue control 
-      ON treated.week_start = control.week_start
+    JOIN normalized_revenue control ON treated.week_start = control.week_start
     WHERE treated.merchant_id IN (SELECT merchant_id FROM treated_merchants)
       AND control.merchant_id NOT IN (SELECT merchant_id FROM treated_merchants)
     GROUP BY treated.merchant_id, control.merchant_id
   ),
-  -- Rank control merchants by similarity (lower residual = better match)
   ranked_matches AS (
-    SELECT 
+    SELECT
       treated_merchant_id,
       control_merchant_id,
       ROUND(1.0 / (1.0 + total_residual), 4) AS similarity_score,
       ROW_NUMBER() OVER (PARTITION BY treated_merchant_id ORDER BY total_residual ASC) AS rank
     FROM similarity_scores
   )
-  SELECT 
-    treated_merchant_id,
-    control_merchant_id,
-    similarity_score
+  SELECT treated_merchant_id, control_merchant_id, similarity_score
   FROM ranked_matches
   WHERE rank <= build_control_group.n_matches
   ORDER BY treated_merchant_id, similarity_score DESC
@@ -212,36 +139,7 @@ print("✓ registered: build_control_group")
 
 # COMMAND ----------
 
-# Smoke test — build control group for the mobile order pilot
-result = spark.sql(f"""
-    SELECT * FROM {CATALOG}.{SCHEMA}.build_control_group('INT_001', 10)
-""")
-display(result)
-
-
-# COMMAND ----------
-
-# Confirm shape — should have 25 treated stores * 10 matches = 250 rows
-n = spark.sql(f"""
-    SELECT COUNT(*) as n FROM {CATALOG}.{SCHEMA}.build_control_group('INT_001', 10)
-""").collect()[0]["n"]
-print(f"Row count: {n} (expected 250)")
-assert n == 250, f"Expected 250, got {n}"
-
-
-# COMMAND ----------
-
-# Confirm similarity scores are between 0 and 1
-spark.sql(f"""
-    SELECT MIN(similarity_score), MAX(similarity_score)
-    FROM {CATALOG}.{SCHEMA}.build_control_group('INT_001', 10)
-""").show()
-
-
-# COMMAND ----------
-
-# MAGIC %md
-# MAGIC ## check_parallel_trends
+display(spark.sql(f"SELECT * FROM {CATALOG}.{SCHEMA}.build_control_group('INT_001', 10)"))
 
 # COMMAND ----------
 
@@ -249,30 +147,18 @@ spark.sql(f"DROP FUNCTION IF EXISTS {CATALOG}.{SCHEMA}.check_parallel_trends")
 
 spark.sql(f"""
 CREATE FUNCTION {CATALOG}.{SCHEMA}.check_parallel_trends(
-    intervention_id STRING  COMMENT 'ID of the intervention to analyze (e.g. INT_001).',
-    n_matches       INT     COMMENT 'Number of control stores per treated store. Must match what was used in build_control_group.'
+    intervention_id STRING,
+    n_matches       INT
 )
 RETURNS TABLE
-COMMENT 'Compute weekly treated vs matched-control revenue trends for a given intervention.
-<<<<<<< Updated upstream
-USE FOR: causal questions — did an intervention work, what was the lift, did the pilot increase revenue. Call this first for any causal question.
-=======
-USE FOR: verifying the parallel trends assumption and visualizing lift over time.
-Call after build_control_group has been reviewed and approved at the HITL checkpoint.
->>>>>>> Stashed changes
-DO NOT USE FOR: descriptive questions — use query_metric instead.'
 RETURN
   WITH intervention_meta AS (
     SELECT
       treated_merchant_ids,
       start_date,
-      DATE_SUB(start_date, 364)              AS match_pre_start,
-      DATE_SUB(start_date, 1)                AS match_pre_end,
-<<<<<<< Updated upstream
-      DATE_SUB(start_date, CAST(pre_window_days  AS INT)) AS trend_pre_start,
-=======
-      DATE_SUB(start_date, 364)              AS trend_pre_start,
->>>>>>> Stashed changes
+      DATE_SUB(start_date, 364) AS match_pre_start,
+      DATE_SUB(start_date, 1)   AS match_pre_end,
+      DATE_SUB(start_date, 364) AS trend_pre_start,
       DATE_ADD(start_date, CAST(post_window_days AS INT)) AS trend_post_end
     FROM main.coffee_analytics.interventions_agent_view
     WHERE intervention_id = check_parallel_trends.intervention_id
@@ -281,12 +167,11 @@ RETURN
     SELECT EXPLODE(treated_merchant_ids) AS merchant_id
     FROM intervention_meta
   ),
-  -- Pre-period weekly revenue for matching (same 52-week window as build_control_group)
   weekly_revenue_match AS (
     SELECT
       t.merchant_id,
       DATE_TRUNC('week', t.txn_date) AS week_start,
-      SUM(t.amount)                  AS weekly_revenue
+      SUM(t.amount) AS weekly_revenue
     FROM main.coffee_analytics_gold.transactions_enriched t
     CROSS JOIN intervention_meta i
     WHERE t.txn_date BETWEEN i.match_pre_start AND i.match_pre_end
@@ -334,12 +219,11 @@ RETURN
     UNION
     SELECT control_merchant_id AS merchant_id FROM top_matches
   ),
-  -- Full window weekly revenue (pre display + post) for all matched merchants
   weekly_revenue_full AS (
     SELECT
       t.merchant_id,
       DATE_TRUNC('week', t.txn_date) AS week_start,
-      SUM(t.amount)                  AS weekly_revenue
+      SUM(t.amount) AS weekly_revenue
     FROM main.coffee_analytics_gold.transactions_enriched t
     CROSS JOIN intervention_meta i
     WHERE t.txn_date BETWEEN i.trend_pre_start AND i.trend_post_end
@@ -347,17 +231,13 @@ RETURN
     GROUP BY t.merchant_id, DATE_TRUNC('week', t.txn_date)
   ),
   treated_agg AS (
-    SELECT
-      week_start,
-      AVG(weekly_revenue) AS treated_avg_revenue
+    SELECT week_start, AVG(weekly_revenue) AS treated_avg_revenue
     FROM weekly_revenue_full
     WHERE merchant_id IN (SELECT merchant_id FROM treated_merchants)
     GROUP BY week_start
   ),
   control_weights AS (
-    SELECT
-      control_merchant_id AS merchant_id,
-      AVG(similarity_score) AS weight
+    SELECT control_merchant_id AS merchant_id, AVG(similarity_score) AS weight
     FROM top_matches
     GROUP BY control_merchant_id
   ),
@@ -382,8 +262,7 @@ RETURN
   ),
   baseline AS (
     SELECT AVG(treated_avg_revenue / NULLIF(control_avg_revenue, 0)) AS baseline_ratio
-    FROM trends
-    WHERE period = 'pre'
+    FROM trends WHERE period = 'pre'
   )
   SELECT
     week_number,
@@ -398,70 +277,30 @@ print("✓ registered: check_parallel_trends")
 
 # COMMAND ----------
 
-<<<<<<< Updated upstream
-=======
+display(spark.sql(f"SELECT * FROM {CATALOG}.{SCHEMA}.check_parallel_trends('INT_001', 10)"))
 
-# COMMAND ----------
-
->>>>>>> Stashed changes
-# MAGIC %md
-# MAGIC ### Smoke tests
-
-# COMMAND ----------
-
-display(spark.sql(f"""
-    SELECT * FROM {CATALOG}.{SCHEMA}.check_parallel_trends('INT_001', 10)
-"""))
-
-# COMMAND ----------
-
-# Pre-period lift should be near zero — confirms parallel trends holds
-result = spark.sql(f"""
-    SELECT ROUND(AVG(ABS(lift_pct)), 4) AS avg_abs_pre_lift
-    FROM {CATALOG}.{SCHEMA}.check_parallel_trends('INT_001', 10)
-    WHERE period = 'pre'
-""").collect()[0]
-print(f"Avg absolute pre-period lift: {result['avg_abs_pre_lift']}% (expected: near 0)")
-
-# COMMAND ----------
-
-# MAGIC %md
-# MAGIC ## estimate_lift
-
-<<<<<<< Updated upstream
-=======
-
-# COMMAND ----------
-
-# MAGIC %md
-# MAGIC ## estimate_lift
-
->>>>>>> Stashed changes
 # COMMAND ----------
 
 spark.sql(f"DROP FUNCTION IF EXISTS {CATALOG}.{SCHEMA}.estimate_lift")
 
 spark.sql(f"""
 CREATE FUNCTION {CATALOG}.{SCHEMA}.estimate_lift(
-    intervention_id STRING  COMMENT 'ID of the intervention to analyze (e.g. INT_001).',
-    n_matches       INT     COMMENT 'Number of control stores per treated store. Must match build_control_group and check_parallel_trends.',
-    first_n_weeks   INT     COMMENT 'Only use the first N post-period weeks. Overrides week_start/week_end. Pass NULL to use all.',
-    week_start      INT     COMMENT 'First post-period week number to include (inclusive). Pass NULL for no lower bound.',
-    week_end        INT     COMMENT 'Last post-period week number to include (inclusive). Pass NULL for no upper bound.'
+    intervention_id STRING,
+    n_matches       INT,
+    first_n_weeks   INT,
+    week_start      INT,
+    week_end        INT
 )
 RETURNS TABLE
-COMMENT 'Estimate average lift % with 95% t-interval confidence bounds over the post-period.
-USE FOR: final causal effect estimation after the HITL checkpoint has been passed and parallel trends approved.
-DO NOT USE FOR: descriptive questions — use query_metric instead.'
 RETURN
   WITH intervention_meta AS (
     SELECT
       treated_merchant_ids,
       start_date,
-      DATE_SUB(start_date, 364)                            AS match_pre_start,
-      DATE_SUB(start_date, 1)                              AS match_pre_end,
-      DATE_SUB(start_date, CAST(pre_window_days  AS INT))  AS trend_pre_start,
-      DATE_ADD(start_date, CAST(post_window_days AS INT))  AS trend_post_end
+      DATE_SUB(start_date, 364)                           AS match_pre_start,
+      DATE_SUB(start_date, 1)                             AS match_pre_end,
+      DATE_SUB(start_date, 364)                           AS trend_pre_start,
+      DATE_ADD(start_date, CAST(post_window_days AS INT)) AS trend_post_end
     FROM main.coffee_analytics.interventions_agent_view
     WHERE intervention_id = estimate_lift.intervention_id
   ),
@@ -473,7 +312,7 @@ RETURN
     SELECT
       t.merchant_id,
       DATE_TRUNC('week', t.txn_date) AS week_start,
-      SUM(t.amount)                  AS weekly_revenue
+      SUM(t.amount) AS weekly_revenue
     FROM main.coffee_analytics_gold.transactions_enriched t
     CROSS JOIN intervention_meta i
     WHERE t.txn_date BETWEEN i.match_pre_start AND i.match_pre_end
@@ -525,7 +364,7 @@ RETURN
     SELECT
       t.merchant_id,
       DATE_TRUNC('week', t.txn_date) AS week_start,
-      SUM(t.amount)                  AS weekly_revenue
+      SUM(t.amount) AS weekly_revenue
     FROM main.coffee_analytics_gold.transactions_enriched t
     CROSS JOIN intervention_meta i
     WHERE t.txn_date BETWEEN i.trend_pre_start AND i.trend_post_end
@@ -594,7 +433,7 @@ RETURN
     SELECT
       AVG(lift_pct)         AS mean_lift,
       STDDEV_SAMP(lift_pct) AS std_lift,
-      COUNT(*)               AS n_weeks
+      COUNT(*)              AS n_weeks
     FROM filtered_post
   ),
   t_critical_lookup AS (
@@ -629,53 +468,26 @@ RETURN
                        ELSE 61 END
   )
   SELECT
-    ROUND(ls.mean_lift, 4)                                             AS lift_pct,
+    ROUND(ls.mean_lift, 4)                                              AS lift_pct,
     ROUND(ls.mean_lift - ts.t_val * ls.std_lift / SQRT(ls.n_weeks), 4) AS ci_lower,
     ROUND(ls.mean_lift + ts.t_val * ls.std_lift / SQRT(ls.n_weeks), 4) AS ci_upper,
-    CAST(ls.n_weeks AS INT)                                            AS n_weeks,
+    CAST(ls.n_weeks AS INT)                                             AS n_weeks,
     CASE WHEN (ls.mean_lift - ts.t_val * ls.std_lift / SQRT(ls.n_weeks)) > 0
               OR (ls.mean_lift + ts.t_val * ls.std_lift / SQRT(ls.n_weeks)) < 0
-         THEN TRUE ELSE FALSE END                                      AS significant
+         THEN TRUE ELSE FALSE END                                       AS significant
   FROM lift_stats ls CROSS JOIN t_selected ts
 """)
 print("✓ registered: estimate_lift")
 
-<<<<<<< Updated upstream
-=======
+# COMMAND ----------
+
+display(spark.sql(f"SELECT * FROM {CATALOG}.{SCHEMA}.estimate_lift('INT_001', 10, NULL, NULL, NULL)"))
 
 # COMMAND ----------
 
-
->>>>>>> Stashed changes
-# COMMAND ----------
-
-# MAGIC %md
-# MAGIC ### Smoke tests
-
-# COMMAND ----------
-
-# Full post-period
-display(spark.sql(f"""
-    SELECT * FROM {CATALOG}.{SCHEMA}.estimate_lift('INT_001', 10, NULL, NULL, NULL)
-"""))
-
-# COMMAND ----------
-
-# First 4 weeks only
-display(spark.sql(f"""
-    SELECT * FROM {CATALOG}.{SCHEMA}.estimate_lift('INT_001', 10, 4, NULL, NULL)
-"""))
-<<<<<<< Updated upstream
-=======
-
-# COMMAND ----------
-
-# MAGIC %sql
-# MAGIC GRANT USE CATALOG ON CATALOG main TO `account users`;
-# MAGIC GRANT USE SCHEMA ON SCHEMA main.coffee_analytics_gold TO `account users`;
-# MAGIC GRANT EXECUTE ON SCHEMA main.coffee_analytics_gold TO `account users`;
-
-# COMMAND ----------
-
-spark.sql("SELECT 1").show()
->>>>>>> Stashed changes
+spark.sql("""
+GRANT USE CATALOG ON CATALOG main TO `account users`;
+GRANT USE SCHEMA ON SCHEMA main.coffee_analytics_gold TO `account users`;
+GRANT EXECUTE ON SCHEMA main.coffee_analytics_gold TO `account users`;
+""")
+print("✓ grants applied")
