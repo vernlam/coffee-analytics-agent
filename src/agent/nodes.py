@@ -1,12 +1,10 @@
-from typing import Literal, Optional
-
-import os
+import json
+import re
+from typing import Optional
 
 from databricks.sdk import WorkspaceClient
 from langchain_core.messages import AIMessage
-from langchain_openai import ChatOpenAI
 from langgraph.types import interrupt
-from pydantic import BaseModel
 
 from .state import AgentState
 from .tools import (
@@ -17,21 +15,9 @@ from .tools import (
     call_query_metric,
 )
 
-
-def _make_llm() -> ChatOpenAI:
-    w = WorkspaceClient()
-    return ChatOpenAI(
-        model="databricks-meta-llama-3-3-70b-instruct",
-        openai_api_base=f"{w.config.host}/serving-endpoints",
-        openai_api_key=w.config.token or "token",
-    )
-
-
-_llm = _make_llm()
-
 _ROUTER_SYSTEM = """You are a router for a coffee shop analytics agent.
 
-Classify the user's question and extract parameters.
+Classify the user's question and extract parameters. Respond with valid JSON only — no markdown, no explanation.
 
 Route as "descriptive" for: totals, averages, trends, breakdowns, what happened.
 Route as "causal" for: did an intervention work, what was the lift, did a pilot increase revenue.
@@ -40,48 +26,68 @@ For descriptive, extract:
 - metric: one of revenue, transaction_count, avg_basket, active_merchants
 - start_date / end_date: ISO format YYYY-MM-DD
 - group_by: one of location_type, region, size_band, brand (or null)
-- filters: location_type (urban/suburban/highway/mall/campus), region (northeast/southeast/midwest/west),
-  size_band (small/mid/large), brand (BrandA/BrandB/BrandC/BrandD) — null if not specified
+- filter_location_type: urban, suburban, highway, mall, campus (or null)
+- filter_region: northeast, southeast, midwest, west (or null)
+- filter_size_band: small, mid, large (or null)
+- filter_brand: BrandA, BrandB, BrandC, BrandD (or null)
 
 For causal, extract:
-- intervention_id: format INT_001, INT_002, etc. (null if not provided by user)
-"""
+- intervention_id: format INT_001, INT_002, etc. (null if not provided)
+
+JSON schema:
+{
+  "route": "descriptive" | "causal",
+  "intervention_id": string | null,
+  "metric": string | null,
+  "start_date": string | null,
+  "end_date": string | null,
+  "group_by": string | null,
+  "filter_location_type": string | null,
+  "filter_region": string | null,
+  "filter_size_band": string | null,
+  "filter_brand": string | null
+}"""
 
 
-class _RouterOutput(BaseModel):
-    route: Literal["descriptive", "causal"]
-    intervention_id: Optional[str] = None
-    metric: Optional[str] = None
-    start_date: Optional[str] = None
-    end_date: Optional[str] = None
-    group_by: Optional[str] = None
-    filter_location_type: Optional[str] = None
-    filter_region: Optional[str] = None
-    filter_size_band: Optional[str] = None
-    filter_brand: Optional[str] = None
-
-
-_router_llm = _llm.with_structured_output(_RouterOutput)
+def _call_llm(messages: list[dict]) -> dict:
+    w = WorkspaceClient()
+    response = w.api_client.do(
+        "POST",
+        "/serving-endpoints/databricks-meta-llama-3-3-70b-instruct/invocations",
+        body={"messages": messages, "temperature": 0, "max_tokens": 500},
+    )
+    content = response["choices"][0]["message"]["content"]
+    try:
+        return json.loads(content)
+    except json.JSONDecodeError:
+        match = re.search(r"```(?:json)?\s*(.*?)\s*```", content, re.DOTALL)
+        if match:
+            return json.loads(match.group(1))
+        raise ValueError(f"Router returned non-JSON: {content}")
 
 
 def router_node(state: AgentState) -> dict:
-    messages = [{"role": "system", "content": _ROUTER_SYSTEM}] + state["messages"]
-    result: _RouterOutput = _router_llm.invoke(messages)
+    messages = [{"role": "system", "content": _ROUTER_SYSTEM}] + [
+        {"role": m.type if hasattr(m, "type") else m["role"],
+         "content": m.content if hasattr(m, "content") else m["content"]}
+        for m in state["messages"]
+    ]
+    result = _call_llm(messages)
 
     updates = {
-        "route": result.route,
-        "intervention_id": result.intervention_id,
-        "metric": result.metric,
-        "start_date": result.start_date,
-        "end_date": result.end_date,
-        "group_by": result.group_by,
-        "filter_location_type": result.filter_location_type,
-        "filter_region": result.filter_region,
-        "filter_size_band": result.filter_size_band,
-        "filter_brand": result.filter_brand,
+        "route": result.get("route"),
+        "intervention_id": result.get("intervention_id"),
+        "metric": result.get("metric"),
+        "start_date": result.get("start_date"),
+        "end_date": result.get("end_date"),
+        "group_by": result.get("group_by"),
+        "filter_location_type": result.get("filter_location_type"),
+        "filter_region": result.get("filter_region"),
+        "filter_size_band": result.get("filter_size_band"),
+        "filter_brand": result.get("filter_brand"),
     }
 
-    if result.route == "causal" and not result.intervention_id:
+    if result.get("route") == "causal" and not result.get("intervention_id"):
         updates["messages"] = [AIMessage(
             content="I need an intervention ID to run the causal analysis. "
                     "What's the ID? It should be in the format INT_001, INT_002, etc."
@@ -125,8 +131,6 @@ def hitl_node(state: AgentState) -> dict:
     pre_lift = state.get("pre_period_lift") or 0.0
     verdict = "parallel trends holds ✓" if pre_lift < 1.0 else "may be violated ⚠️"
 
-    # interrupt() pauses the graph here and returns control to the caller.
-    # When the graph is resumed, decision = whatever the human typed.
     decision = interrupt(
         f"Pre-period avg absolute lift: {pre_lift:.2f}% — {verdict}\n\n"
         "Do you approve proceeding with the lift estimate? (yes / no)"
